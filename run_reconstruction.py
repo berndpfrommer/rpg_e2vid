@@ -2,8 +2,7 @@ import torch
 from utils.loading_utils import load_model, get_device
 import numpy as np
 import argparse
-import pandas as pd
-from utils.event_readers import FixedSizeEventReader, FixedDurationEventReader
+from utils.event_readers import FixedSizeEventReader, FixedDurationEventReader, find_sensor_size
 from utils.inference_utils import events_to_voxel_grid, events_to_voxel_grid_pytorch
 from utils.timers import Timer
 import time
@@ -27,6 +26,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_events_per_pixel', default=0.35, type=float,
                         help='in case N (window size) is not specified, it will be \
                               automatically computed as N = width * height * num_events_per_pixel')
+    parser.add_argument('--topic', default='/event_camera/events')
     parser.add_argument('--skipevents', default=0, type=int)
     parser.add_argument('--suboffset', default=0, type=int)
     parser.add_argument('--compute_voxel_grid_on_cpu', dest='compute_voxel_grid_on_cpu', action='store_true')
@@ -35,15 +35,9 @@ if __name__ == "__main__":
     set_inference_options(parser)
 
     args = parser.parse_args()
+    if args.compute_voxel_grid_on_cpu:
+        print('Will compute voxel grid on CPU.')
 
-    # Read sensor size from the first first line of the event file
-    path_to_events = args.input_file
-
-    header = pd.read_csv(path_to_events, delim_whitespace=True, header=None, names=['width', 'height'],
-                         dtype={'width': np.int, 'height': np.int},
-                         nrows=1)
-    width, height = header.values[0]
-    print('Sensor size: {} x {}'.format(width, height))
 
     # Load model
     model = load_model(args.path_to_model)
@@ -52,13 +46,24 @@ if __name__ == "__main__":
     model = model.to(device)
     model.eval()
 
-    reconstructor = ImageReconstructor(model, height, width, model.num_bins, args)
-
     """ Read chunks of events using Pandas """
 
-    # Loop through the events and reconstruct images
-    N = args.window_size
-    if not args.fixed_duration:
+    initial_offset = args.skipevents
+    sub_offset = args.suboffset
+    start_index = initial_offset + sub_offset
+
+    path_to_events = args.input_file
+
+    # Read sensor size from the event file
+    width, height = find_sensor_size(path_to_events, args.topic)
+    print('Sensor size: {} x {}'.format(width, height))
+
+    if args.fixed_duration:
+        event_window_iterator = FixedDurationEventReader(path_to_events, topic=args.topic,
+                                                         duration_ms=args.window_duration,
+                                                         start_index=start_index)
+    else:
+        N = args.window_size
         if N is None:
             N = int(width * height * args.num_events_per_pixel)
             print('Will use {} events per tensor (automatically estimated with num_events_per_pixel={:0.2f}).'.format(
@@ -72,20 +77,12 @@ if __name__ == "__main__":
             elif mean_num_events_per_pixel > 1.5:
                 print('!!Warning!! the number of events used ({}) seems to be high compared to the sensor size. \
                     The reconstruction results might be suboptimal.'.format(N))
+        event_window_iterator = FixedSizeEventReader(path_to_events, topic=args.topic,
+                                                     num_events=N, start_index=start_index)
 
-    initial_offset = args.skipevents
-    sub_offset = args.suboffset
-    start_index = initial_offset + sub_offset
 
-    if args.compute_voxel_grid_on_cpu:
-        print('Will compute voxel grid on CPU.')
+    reconstructor = ImageReconstructor(model, height, width, model.num_bins, args)
 
-    if args.fixed_duration:
-        event_window_iterator = FixedDurationEventReader(path_to_events,
-                                                         duration_ms=args.window_duration,
-                                                         start_index=start_index)
-    else:
-        event_window_iterator = FixedSizeEventReader(path_to_events, num_events=N, start_index=start_index)
 
     with Timer('Processing entire dataset'):
         for event_window in event_window_iterator:
