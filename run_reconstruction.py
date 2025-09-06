@@ -8,7 +8,7 @@ from utils.timers import Timer
 import time
 from image_reconstructor import ImageReconstructor
 from options.inference_options import set_inference_options
-
+import pdb
 
 if __name__ == "__main__":
 
@@ -27,6 +27,7 @@ if __name__ == "__main__":
                         help='in case N (window size) is not specified, it will be \
                               automatically computed as N = width * height * num_events_per_pixel')
     parser.add_argument('--topic', default='/event_camera/events')
+    parser.add_argument('--output_bag', default=None)
     parser.add_argument('--skipevents', default=0, type=int)
     parser.add_argument('--suboffset', default=0, type=int)
     parser.add_argument('--compute_voxel_grid_on_cpu', dest='compute_voxel_grid_on_cpu', action='store_true')
@@ -86,8 +87,9 @@ if __name__ == "__main__":
 
     with Timer('Processing entire dataset'):
         for event_window in event_window_iterator:
-
+            ros_start_time = event_window_iterator.ros_start_time
             last_timestamp = event_window[-1, 0]
+            sensor_start_time = event_window_iterator.sensor_start_time
 
             with Timer('Building event tensor'):
                 if args.compute_voxel_grid_on_cpu:
@@ -104,6 +106,7 @@ if __name__ == "__main__":
                                                                 device=device)
 
             num_events_in_window = event_window.shape[0]
-            reconstructor.update_reconstruction(event_tensor, start_index + num_events_in_window, last_timestamp)
+            reconstructor.update_reconstruction(event_tensor, start_index + num_events_in_window, last_timestamp, ros_start_time, sensor_start_time)
+
 
             start_index += num_events_in_window

@@ -7,7 +7,7 @@ from .timers import Timer
 from utils.bag_reader_ros2 import BagReader
 import event_camera_py
 import pandas as pd
-
+import rclpy
 
 def find_sensor_size(path_to_event_file, topic):
     if isdir(path_to_event_file): # assume ROS2 bag
@@ -87,6 +87,8 @@ class FixedDurationEventReader:
         self.last_stamp = None
         self.duration_s = duration_ms / 1000.0
         self.frame_end = None
+        self.ros_start_time = None
+        self.sensor_start_time = 0  # in nanoseconds
 
 
     def __iter__(self):
@@ -104,11 +106,24 @@ class FixedDurationEventReader:
         self.frame_end +=int(self.duration_s * 1000000)
 
     def get_first_time_stamp(self):
+        '''get the ROS timestamp of the end of the first frame.
+        This corresponds to the ROS timestamp of the very first event.'''
         while self.bag_reader.has_next() and self.frame_end is None:
             _, self.last_msg, _ = self.bag_reader.read_next()
             self.frame_end = self.decoder.find_first_sensor_time(self.last_msg)
+            if self.frame_end is not None and self.ros_start_time is None:
+                t_ros_first = rclpy.time.Time.from_msg(self.last_msg.header.stamp)
+                start_time = self.decoder.get_start_time() # in usec or None
+                if start_time is not None:  # sensor has time since UTC
+                    self.ros_start_time = rclpy.time.Time(nanoseconds=start_time * 1000)
+                    self.sensor_start_time = start_time * 1000
+                    print('ros start time: ', self.ros_start_time)
+                    print('sensor start time: ', self.sensor_start_time)
+                else:
+                    self.ros_start_time = t_ros_first - rclpy.time.Duration(seconds=0, nanoseconds=self.frame_end * 1000)
         if self.frame_end is not None:
             self.update_frame_end()  # increment by frame delta
+        print('first frame end time: ', self.frame_end)
         return self.frame_end
     
     def fetch_events_from_bag(self):

@@ -13,7 +13,10 @@ import atexit
 import scipy.stats as st
 import torch.nn.functional as F
 from math import sqrt
-
+import rosbag2_py
+import cv_bridge
+import rclpy
+from rclpy.serialization import serialize_message
 
 def make_event_preview(events, mode='red-blue', num_bins_to_show=-1):
     # events: [1 x C x H x W] event tensor
@@ -105,7 +108,6 @@ class EventPreprocessor:
                     stddev = torch.sqrt((events ** 2).sum() / num_nonzeros - mean ** 2)
                     mask = nonzero_ev.float()
                     events = mask * (events - mean) / stddev
-
         return events
 
 
@@ -165,12 +167,13 @@ class ImageWriter:
         self.save_events = options.show_events
         self.event_display_mode = options.event_display_mode
         self.num_bins_to_show = options.num_bins_to_show
+        self.output_bag_name = options.output_bag
         print('== Image Writer ==')
         if self.output_folder:
             ensure_dir(self.output_folder)
             ensure_dir(join(self.output_folder, self.dataset_name))
             print('Will write images to: {}'.format(join(self.output_folder, self.dataset_name)))
-            self.timestamps_file = open(join(self.output_folder, self.dataset_name, 'timestamps.txt'), 'a')
+            self.timestamps_file = open(join(self.output_folder, self.dataset_name, 'timestamps.txt'), 'w')
 
             if self.save_events:
                 self.event_previews_folder = join(self.output_folder, self.dataset_name, 'events')
@@ -180,8 +183,25 @@ class ImageWriter:
             atexit.register(self.__cleanup__)
         else:
             print('Will not write images to disk.')
+        if self.output_bag_name:
+            fmt = 'cdr'
+            self.bag_writer = rosbag2_py.SequentialWriter()
+            storage_options = rosbag2_py._storage.StorageOptions(
+                uri=self.output_bag_name, storage_id='mcap')
+            converter_options = rosbag2_py.ConverterOptions(
+                input_serialization_format=fmt, output_serialization_format=fmt)
+            self.bag_writer.open(storage_options, converter_options)
+            self.image_topic = options.topic + '/image_raw'
+            topic = rosbag2_py._storage.TopicMetadata(
+                0, name=self.image_topic,
+                type='sensor_msgs/msg/Image',
+                serialization_format=fmt)
+            self.bag_writer.create_topic(topic)
+        else:
+            self.bag_writer = None
 
-    def __call__(self, img, event_tensor_id, stamp=None, events=None):
+
+    def __call__(self, img, event_tensor_id, stamp=None, events=None, ros_start_time=None, sensor_start_time=None):
         if not self.output_folder:
             return
 
@@ -192,9 +212,26 @@ class ImageWriter:
                              'events_{:010d}.png'.format(event_tensor_id)), event_preview)
 
         cv2.imwrite(join(self.output_folder, self.dataset_name,
-                         'frame_{:010d}.png'.format(event_tensor_id)), img)
+                         'frame_{:010d}.png'.format(int(stamp))), img)
         if stamp is not None:
-            self.timestamps_file.write('{:.18f}\n'.format(stamp))
+            #self.timestamps_file.write('{:.18f}\n'.format(stamp))
+            if self.bag_writer is not None and ros_start_time is not None:
+                t_rec = ros_start_time + rclpy.duration.Duration(nanoseconds=stamp * 1000)
+                #self.timestamps_file.write('{:d} {:d}\n'.format(t_rec.nanoseconds, int(stamp * 10)//10))
+                # sensor time stamps are printed in usec
+                self.timestamps_file.write('{:d} {:d}\n'.format(t_rec.nanoseconds, int(stamp) + int(sensor_start_time // 1000)))
+            else:
+                self.timestamps_file.write('{:d}\n'.format(int(stamp * 10)//10))
+        if self.bag_writer is not None:
+            t_rec = ros_start_time + rclpy.duration.Duration(nanoseconds=stamp * 1000)
+            msg = cv_bridge.CvBridge().cv2_to_imgmsg(img, encoding='passthrough')
+            # msg = cv_bridge.CvBridge().cv2_to_imgmsg(img, encoding='mono8') # broken
+            msg.header.stamp = t_rec.to_msg()
+            msg.header.frame_id = 'event_camera'
+            print('ros time: ', t_rec.nanoseconds, 'sensor time: ', int(stamp * 1000) + int(sensor_start_time))
+            self.bag_writer.write(self.image_topic,
+                                  serialize_message(msg), t_rec.nanoseconds)
+
 
     def __cleanup__(self):
         if self.output_folder:

@@ -54,7 +54,7 @@ class ImageReconstructor:
         self.image_writer = ImageWriter(options)
         self.image_display = ImageDisplay(options)
 
-    def update_reconstruction(self, event_tensor, event_tensor_id, stamp=None):
+    def update_reconstruction(self, event_tensor, event_tensor_id, stamp=None, ros_start_time=None, sensor_start_time=None):
         with torch.no_grad():
 
             with CudaTimer('Reconstruction'):
@@ -79,7 +79,6 @@ class ImageReconstructor:
                     with CudaTimer('Inference'):
                         new_predicted_frame, states = self.model(events_for_each_channel[channel],
                                                                  self.last_states_for_each_channel[channel])
-
                     if self.no_recurrent:
                         self.last_states_for_each_channel[channel] = None
                     else:
@@ -97,7 +96,6 @@ class ImageReconstructor:
                     with CudaTimer('Tensor (GPU) -> NumPy (CPU)'):
                         reconstructions_for_each_channel[channel] = new_predicted_frame[0, 0, crop.iy0:crop.iy1,
                                                                                         crop.ix0:crop.ix1].cpu().numpy()
-
                 if self.perform_color_reconstruction:
                     out = merge_channels_into_color_image(reconstructions_for_each_channel)
                 else:
@@ -106,5 +104,5 @@ class ImageReconstructor:
             # Post-processing, e.g bilateral filter (on CPU)
             out = self.image_filter(out)
 
-            self.image_writer(out, event_tensor_id, stamp, events=events)
+            self.image_writer(out, event_tensor_id, stamp, events=events, ros_start_time=ros_start_time, sensor_start_time=sensor_start_time)
             self.image_display(out, events)
